@@ -1,0 +1,161 @@
+---
+########################################################
+# VALIDATE REQUIRED EXTRA VARIABLES
+########################################################
+
+- name: FAIL PLAYBOOK IF username IS UNDEFINED
+  ansible.builtin.fail:
+    msg: Define username as extra_vars
+  when: username is undefined
+
+########################################################
+# LOAD API KEYS
+########################################################
+- name: LOAD API KEYS VARIABLES
+  include_vars: "/var/ansible/var_files/secret_keys/{{ username }}/{{ inventory_hostname }}.yml"
+
+- name: DEBUG - FIREWALL RULES VARIABLE
+  debug:
+    var: rules
+
+- name: SET API KEYS FACTS
+  set_fact:
+    osense_key: "{{ key }}"
+    osense_secret: "{{ secret }}"
+
+- name: DEBUG API KEYS
+  debug:
+    msg:
+      - "key: {{ osense_key }}"
+      - "secret: {{ osense_secret }}"
+
+########################################################
+# GET ALL FIREWALL AUTOMATION RULES
+########################################################
+
+# curl -k -u "{{ osense_key }}":"{{ osense_secret }}" \
+#   https://{{ ansible_host }}/api/firewall/filter/searchRule | jq .
+- name: SEND REQUEST TO TARGET - GET ALL AUTOMATION RULES
+  ansible.builtin.uri:
+    url: https://{{ ansible_host }}/api/firewall/filter/searchRule
+    validate_certs: false
+    method: POST
+    body_format: json
+    user: "{{ osense_key }}"
+    password: "{{ osense_secret }}"
+    force_basic_auth: true
+  register: output_req_fw_rules_get
+  delegate_to: localhost
+
+- name: DEBUG - FIREWALL RULES GET RESPONSE
+  debug:
+    var: output_req_fw_rules_get.json.rows
+
+# ########################################################
+# # DELETE EXISTING FIREWALL AUTOMATION RULES
+# ########################################################
+
+# curl -k -u "{{ osense_key }}":"{{ osense_secret }}" \
+#   https://{{ ansible_host }}/api/firewall/filter/delRule/<uuid> | jq .
+- name: SEND REQUEST TO TARGET - DELETE ALL AUTOMATION RULES
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}/api/firewall/filter/delRule/{{ item.uuid }}"
+    validate_certs: false
+    method: POST
+    body_format: json
+    user: "{{ osense_key }}"
+    password: "{{ osense_secret }}"
+    force_basic_auth: true
+  loop: "{{ output_req_fw_rules_get.json.rows }}"
+  register: output_req_fw_rules_del
+  delegate_to: localhost
+  no_log: true
+  when: output_req_fw_rules_get.json.rows | length > 0
+
+- name: DEBUG - FIREWALL RULES DELETE RESPONSE
+  debug:
+    var: output_req_fw_rules_del
+
+# ########################################################
+# # ADD NEW FIREWALL AUTOMATION RULES
+# ########################################################
+
+# curl -kX POST -H "Content-Type: application/json" \
+#   -u "{{ osense_key }}":"{{ osense_secret }}" \
+#   https://{{ ansible_host }}/api/firewall/filter/addRule \
+#   -d '{"rule": {...}}' | jq .
+- name: SEND REQUEST TO TARGET - ADD NEW FW AUTOMATION RULES
+  ansible.builtin.uri:
+    url: https://{{ ansible_host }}/api/firewall/filter/addRule
+    validate_certs: false
+    method: POST
+    body_format: json
+    user: "{{ osense_key }}"
+    password: "{{ osense_secret }}"
+    force_basic_auth: true
+    body:
+      rule: "{{ item }}"
+  loop: "{{ rules }}"
+  register: output_req_fw_rules_add
+  delegate_to: localhost
+
+- name: DEBUG - FIREWALL RULES ADD RESPONSE
+  debug:
+    var: output_req_fw_rules_add
+
+- name: DEBUG - FIREWALL RULES ADD RESULT DETAILS
+  debug:
+    msg:
+      - "Descriptions: {{ output_req_fw_rules_add | community.general.json_query('results[*].json') }}"
+      - "Items: {{ output_req_fw_rules_add | community.general.json_query('results[*].item') }}"
+
+# ########################################################
+# # APPLY FIREWALL RULESET CHANGES
+# ########################################################
+
+# curl -kX POST -u "{{ osense_key }}":"{{ osense_secret }}" \
+#   https://{{ ansible_host }}/api/firewall/filter/apply -d "" | jq .
+- name: SEND REQUEST TO TARGET - APPLY CHANGES TO RULE BASE
+  ansible.builtin.uri:
+    url: https://{{ ansible_host }}/api/firewall/filter/apply
+    validate_certs: false
+    method: POST
+    body_format: json
+    user: "{{ osense_key }}"
+    password: "{{ osense_secret }}"
+    force_basic_auth: true
+  register: output_req_fw_rules_apply
+  delegate_to: localhost
+  no_log: true
+
+- name: DEBUG - FIREWALL RULES APPLY RESPONSE
+  debug:
+    var: output_req_fw_rules_apply
+
+########################################################
+# BACKUP CURRENT CONFIGURATION
+########################################################
+
+- name: GENERATE BACKUP TIMESTAMP
+  set_fact:
+    backup_timestamp: "{{ lookup('pipe', 'date +%Y%m%d%H%M%S') }}"
+
+- name: BACKUP CONFIG.XML FROM TARGET TO LOCAL
+  ansible.builtin.fetch:
+    src: /conf/config.xml
+    dest: "~/backups/config.xml.{{ ansible_host }}.{{ backup_timestamp }}"
+    flat: yes
+  register: config_backup
+  failed_when: config_backup.failed and not config_backup.skipped
+
+- name: CREATE LOCAL BACKUP COPY ON TARGET DEVICE
+  ansible.builtin.copy:
+    src: /conf/config.xml
+    dest: /conf/bak-config.xml
+    force: true
+    remote_src: true
+
+- name: VERIFY CONFIG BACKUP WAS SUCCESSFUL
+  ansible.builtin.fail:
+    msg: "Backup of /conf/config.xml failed."
+  when: config_backup is failed

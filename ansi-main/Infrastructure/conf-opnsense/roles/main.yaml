@@ -1,0 +1,32 @@
+---
+# USAGE:
+# TEST-env:
+# rule_add
+#   ansible-playbook -i hosts.firewall main.yml --ask-vault-pass --tags "rules_add" -l vcc -e user=ops1
+#   ansible-playbook -i hosts.firewall main.yml --ask-vault-pass --tags "rules_add" -l cx1-dmz-ext-fw* -e user=ops1
+#
+# snat_add
+#   ansible-playbook -i hosts.firewall main.yml --ask-vault-pass --tags "snat_add" -l vcc -e user=ops1
+#   ansible-playbook -i hosts.firewall main.yml --ask-vault-pass --tags "snat_add" -l cx1_dmz-ext-fw1 -e user=ops1
+#
+# ha_add
+#   ansible-playbook -i hosts.firewall main.yml --ask-vault-pass --tags "ha_add" -l cx1dmzextha -e user=melven
+#
+# syslog_add
+#   ansible-playbook -i hosts.firewall main.yml --ask-vault-pass --tags "syslog_add" -l vault-core-cdg-fw1 -e user=melven
+#
+# snmp_add
+#   ansible-playbook -i hosts.firewall main.yml --ask-vault-pass --tags "snmp_add" -l vault-core-cdg-fw1 -e username=melven
+#
+
+- hosts: all
+  gather_facts: False
+    
+  roles:
+    - {role: rules_add, tags: ['rules_add']}
+    # - {role: snmp_add, tags: ['snmp_add']}
+    # - {role: outbound_nat_add, tags: ['outbound_nat_add']}
+    # - {role: gateway_add, tags: ['gateway_add']}
+    # - {role: vip_add, tags: ['vip_add']}
+    # - {role: routes_add, tags: ['routes_add']}
+    # - {role: interfaces_add, tags: ['interfaces_add']}

@@ -1,0 +1,220 @@
+---
+- name: Show router being processed
+  debug:
+    msg: "Starting upgrade for {{ inventory_hostname }} ({{ ansible_host }})"
+
+- name: Check local firmware file exists
+  delegate_to: localhost
+  stat:
+    path: "{{ local_file }}"
+  register: fw_file
+
+- name: Stop if local firmware file is missing
+  fail:
+    msg: "Firmware file not found locally: {{ local_file }}"
+  when: not fw_file.stat.exists
+
+- name: Upload firmware to MikroTik
+  delegate_to: localhost
+  command: >
+    sshpass -p {{ ansible_password | quote }}
+    scp -o StrictHostKeyChecking=no
+    {{ local_file }}
+    {{ ansible_user }}@{{ ansible_host }}:/{{ remote_file }}
+  register: upload_result
+  changed_when: true
+
+- name: Check package file exists on router
+  delegate_to: localhost
+  command: >
+    sshpass -p {{ ansible_password | quote }}
+    ssh -o StrictHostKeyChecking=no
+    {{ ansible_user }}@{{ ansible_host }}
+    /file print
+  register: file_list
+  changed_when: false
+
+- name: Stop if firmware file is missing on router after upload
+  fail:
+    msg: "Firmware file {{ remote_file }} not found on {{ inventory_hostname }} after upload"
+  when: file_list.stdout is not defined or remote_file not in file_list.stdout
+
+- name: Check current RouterOS version before reboot
+  delegate_to: localhost
+  command: >
+    sshpass -p {{ ansible_password | quote }}
+    ssh -o StrictHostKeyChecking=no
+    {{ ansible_user }}@{{ ansible_host }}
+    /system package print
+  register: version_before
+  changed_when: false
+
+- name: Show current version
+  debug:
+    var: version_before.stdout_lines
+
+- name: Create export backup
+  delegate_to: localhost
+  command: >
+    sshpass -p {{ ansible_password | quote }}
+    ssh -o StrictHostKeyChecking=no
+    {{ ansible_user }}@{{ ansible_host }}
+    /export file=pre-upgrade-config
+  changed_when: true
+
+- name: Create binary backup
+  delegate_to: localhost
+  command: >
+    sshpass -p {{ ansible_password | quote }}
+    ssh -o StrictHostKeyChecking=no
+    {{ ansible_user }}@{{ ansible_host }}
+    /system backup save name=pre-upgrade-backup
+  changed_when: true
+
+- name: Reboot router to install uploaded package
+  delegate_to: localhost
+  command: >
+    sshpass -p {{ ansible_password | quote }}
+    ssh -o StrictHostKeyChecking=no
+    {{ ansible_user }}@{{ ansible_host }}
+    /system reboot
+  ignore_errors: true
+
+- name: Wait for SSH to go down
+  delegate_to: localhost
+  wait_for:
+    host: "{{ ansible_host }}"
+    port: 22
+    state: stopped
+    timeout: 120
+
+- name: Wait for SSH to come back
+  delegate_to: localhost
+  wait_for:
+    host: "{{ ansible_host }}"
+    port: 22
+    state: started
+    timeout: "{{ reboot_timeout }}"
+    delay: 10
+
+- name: Pause after first reboot
+  pause:
+    seconds: "{{ post_reboot_delay }}"
+
+- name: Check RouterOS version after reboot
+  delegate_to: localhost
+  command: >
+    sshpass -p {{ ansible_password | quote }}
+    ssh -o StrictHostKeyChecking=no
+    {{ ansible_user }}@{{ ansible_host }}
+    /system package print
+  register: version_after
+  changed_when: false
+
+- name: Fail if RouterOS version is not upgraded
+  fail:
+    msg: |
+      Upgrade failed on {{ inventory_hostname }}.
+      Expected version: {{ target_version }}
+      Actual output:
+      {{ version_after.stdout }}
+  when: target_version not in version_after.stdout
+
+- name: Show upgraded RouterOS version
+  debug:
+    var: version_after.stdout_lines
+
+- name: Check RouterBOARD firmware
+  delegate_to: localhost
+  command: >
+    sshpass -p {{ ansible_password | quote }}
+    ssh -o StrictHostKeyChecking=no
+    {{ ansible_user }}@{{ ansible_host }}
+    /system routerboard print
+  register: rb_info
+  changed_when: false
+
+- name: Show RouterBOARD info
+  debug:
+    var: rb_info.stdout_lines
+
+- name: Set RouterBOARD firmware values
+  set_fact:
+    rb_current: "{{ rb_info.stdout | regex_search('current-firmware: *([^\\n]+)', '\\1') | first | default('') }}"
+    rb_upgrade: "{{ rb_info.stdout | regex_search('upgrade-firmware: *([^\\n]+)', '\\1') | first | default('') }}"
+
+- name: Upgrade RouterBOARD firmware if needed
+  delegate_to: localhost
+  command: >
+    sshpass -p {{ ansible_password | quote }}
+    ssh -o StrictHostKeyChecking=no
+    {{ ansible_user }}@{{ ansible_host }}
+    /system routerboard upgrade
+  when:
+    - rb_current != ''
+    - rb_upgrade != ''
+    - rb_current != rb_upgrade
+
+- name: Reboot after RouterBOARD upgrade
+  delegate_to: localhost
+  command: >
+    sshpass -p {{ ansible_password | quote }}
+    ssh -o StrictHostKeyChecking=no
+    {{ ansible_user }}@{{ ansible_host }}
+    /system reboot
+  when:
+    - rb_current != ''
+    - rb_upgrade != ''
+    - rb_current != rb_upgrade
+  ignore_errors: true
+
+- name: Wait for SSH to go down after RouterBOARD reboot
+  delegate_to: localhost
+  wait_for:
+    host: "{{ ansible_host }}"
+    port: 22
+    state: stopped
+    timeout: 120
+  when:
+    - rb_current != ''
+    - rb_upgrade != ''
+    - rb_current != rb_upgrade
+
+- name: Wait for SSH to come back after RouterBOARD reboot
+  delegate_to: localhost
+  wait_for:
+    host: "{{ ansible_host }}"
+    port: 22
+    state: started
+    timeout: "{{ reboot_timeout }}"
+    delay: 10
+  when:
+    - rb_current != ''
+    - rb_upgrade != ''
+    - rb_current != rb_upgrade
+
+- name: Pause after second reboot
+  pause:
+    seconds: "{{ post_reboot_delay }}"
+  when:
+    - rb_current != ''
+    - rb_upgrade != ''
+    - rb_current != rb_upgrade
+
+- name: Final RouterBOARD check
+  delegate_to: localhost
+  command: >
+    sshpass -p {{ ansible_password | quote }}
+    ssh -o StrictHostKeyChecking=no
+    {{ ansible_user }}@{{ ansible_host }}
+    /system routerboard print
+  register: rb_final
+  changed_when: false
+
+- name: Show final RouterBOARD info
+  debug:
+    var: rb_final.stdout_lines
+
+- name: Confirm success
+  debug:
+    msg: "SUCCESS: {{ inventory_hostname }} upgraded successfully to {{ target_version }}"

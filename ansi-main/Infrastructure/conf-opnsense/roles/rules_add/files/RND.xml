@@ -1,0 +1,16 @@
+<rules>
+  <rule>
+    <enabled>1</enabled>
+    <sequence>1</sequence>
+    <action>pass</action>
+    <log>1</log>
+    <interface>lan</interface>
+    <direction>in</direction>
+    <protocol>TCP</protocol>
+    <source_net>any</source_net>
+    <destination_net>1.1.1.1</destination_net>
+    <destination_port>HTTP_PORTS</destination_port>
+    <description>Ansible test</description>
+    <gateway>WAN_GW</gateway>
+  </rule>
+</rules>
