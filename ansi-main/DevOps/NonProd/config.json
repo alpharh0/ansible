@@ -26,13 +26,36 @@
                 "mt1": {
                     "mgmt_ip": "10.254.248.251",
                     "upgrade": {
-                        "local_file": "/root/Dev/ansi-main/Infrastructure/conf-mikrotik/roles/upgrade/firmware/7.20.8/routeros-7.20.8-arm.npk",
-                        "remote_file": "routeros-7.20.8-arm.npk",
-                        "target_version": "7.20.8",
+                        "local_file": "/root/Dev/ansi-main/Infrastructure/conf-mikrotik/roles/upgrade/firmware/7.24.2/routeros-7.24.2-arm.npk",
+                        "remote_file": "routeros-7.24.2-arm.npk",
+                        "target_version": "7.24.2",
                         "reboot_timeout": 600,
                         "post_reboot_delay": 20  
                     }
                 }    
+            },
+            "conf_edgerouter": {
+                "er1": {
+                    "devices": [
+                        { "ip": "10.254.248.151" },
+                        { "ip": "10.254.248.199" }
+                    ],
+                    "upload": {
+                    "remote_path": "/tmp",
+                    "files": [
+                        {
+                        "version": "v1",
+                        "filename": "ER-e300.v1.10.11.5274269.tar",
+                        "src_subdir": "1.10.11"
+                        },
+                        {
+                        "version": "v2",
+                        "filename": "ER-e300.v2.0.9-hotfix.7.5622762.tar",
+                        "src_subdir": "2.0.9"
+                        }
+                    ]
+                    }
+                }
             }
         }
     }

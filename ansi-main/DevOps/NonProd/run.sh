@@ -147,6 +147,92 @@ EOF
 }
 
 # ----------------------
+# Ansible EdgeRouter Runner
+# ----------------------
+# run_ansible_edgerouter() {
+#   local ROUTER_NAME=$1
+#   local ROUTER_SECTION=$2
+#   local ROLE="$ROUTER_SECTION"
+
+#   echo "Deploying EdgeRouter [$ROUTER_NAME] section [$ROUTER_SECTION]"
+
+#   local INVENTORY_FILE="/tmp/inventory_${ROUTER_NAME}.ini"
+
+#   local ROUTER_IP
+#   ROUTER_IP=$(jq -r \
+#     ".\"$CUSTOMER\".\"$PROJECT\".\"conf-edgerouter\".\"$ROUTER_NAME\".\"mgmt_ip\"" \
+#     "$CONFIG_FILE")
+
+#   if [ -z "$ROUTER_IP" ] || [ "$ROUTER_IP" = "null" ]; then
+#     echo "Error: mgmt_ip not found for router $ROUTER_NAME"
+#     exit 1
+#   fi
+
+#   cat > "$INVENTORY_FILE" <<EOF
+# [edgerouters]
+# $ROUTER_NAME ansible_host=$ROUTER_IP ansible_user=admin ansible_password='yourpassword'
+# EOF
+
+#   local ROUTER_SECTION_DATA
+#   ROUTER_SECTION_DATA=$(jq -c \
+#     ".\"$CUSTOMER\".\"$PROJECT\".\"conf-edgerouter\".\"$ROUTER_NAME\".\"$ROUTER_SECTION\"" \
+#     "$CONFIG_FILE")
+
+#   if [ -z "$ROUTER_SECTION_DATA" ] || [ "$ROUTER_SECTION_DATA" = "null" ]; then
+#     echo "Error: Section $ROUTER_SECTION not found for router $ROUTER_NAME"
+#     rm -f "$INVENTORY_FILE"
+#     exit 1
+#   fi
+
+#   ansible-playbook \
+#     -i "$INVENTORY_FILE" \
+#     /root/Dev/ansi-main/Infrastructure/conf-edgerouter/roles/main.yaml \
+#     --tags "$ROLE" \
+#     -l "$ROUTER_NAME" \
+#     --extra-vars "$ROUTER_SECTION_DATA"
+
+#   rm -f "$INVENTORY_FILE"
+#}
+
+run_ansible_edgerouter() {
+  local ROUTER_NAME=$1
+  local ROUTER_SECTION=$2
+
+  echo "Deploying EdgeRouter [$ROUTER_NAME] section [$ROUTER_SECTION]"
+
+  local INVENTORY_FILE="/tmp/inventory_${ROUTER_NAME}.ini"
+
+  DEVICES=$(jq -c \
+    ".\"$CUSTOMER\".\"$PROJECT\".\"conf_edgerouter\".\"$ROUTER_NAME\".devices[]" \
+    "$CONFIG_FILE")
+
+  echo "[edgerouter]" > "$INVENTORY_FILE"
+
+  for DEVICE in $DEVICES; do
+    IP=$(echo "$DEVICE" | jq -r '.ip')
+    PASS=$(echo "$DEVICE" | jq -r '.password')
+
+    echo "${ROUTER_NAME}_${IP} ansible_host=$IP" >> "$INVENTORY_FILE"
+  done
+
+  ROUTER_DATA=$(jq -c \
+    ".\"$CUSTOMER\".\"$PROJECT\".\"conf_edgerouter\".\"$ROUTER_NAME\"" \
+    "$CONFIG_FILE")
+
+  EXTRA_VARS=$(jq -nc --argjson data "$ROUTER_DATA" '{conf_edgerouter: $data}')
+
+  ansible-playbook \
+  -i "$INVENTORY_FILE" \
+  -i /root/Dev/ansi-main/DevOps/NonProd/inventory.ini \
+  /root/Dev/ansi-main/Infrastructure/conf-edgerouter/roles/main.yaml \
+  --tags "$ROUTER_SECTION" \
+  -l "${ROUTER_NAME}_*" \
+  --extra-vars "$EXTRA_VARS"
+
+  rm -f "$INVENTORY_FILE"
+}
+
+# ----------------------
 # Execution
 # ----------------------
 echo "=== Execution: $CUSTOMER / $PROJECT -> $ACTION $MODULE ==="
@@ -168,6 +254,15 @@ case "$MODULE" in
     fi
 
     run_ansible_router "$TARGET_NAME" "$TARGET_SECTION"
+    ;;
+
+  edgerouter)
+    if [ -z "$TARGET_NAME" ] || [ -z "$TARGET_SECTION" ]; then
+      echo "Usage: $0 $CUSTOMER $PROJECT apply edgerouter <ROUTER_NAME> <SECTION>"
+      exit 1
+    fi
+
+    run_ansible_edgerouter "$TARGET_NAME" "$TARGET_SECTION"
     ;;
 
   *)

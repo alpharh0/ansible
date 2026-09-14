@@ -1,0 +1,23 @@
+---
+# EdgeRouter Ansible entrypoint
+# ansible-playbook main.yaml --tags precheck,upgrade,postcheck
+# ansible-playbook -i hosts.edgerouter main.yaml --ask-vault-pass --tags "precheck,upgrade,postcheck"
+
+
+# ./run.sh customer_name project_1 apply edgerouter er1 upload
+# ./run.sh customer_name project_1 apply edgerouter er1 upgrade
+
+- hosts: all
+  serial: 1
+  max_fail_percentage: 0
+  gather_facts: False
+
+  roles:
+  #  - { role: precheck, tags: ['precheck'] }
+    - { role: upgrade, tags: ['upgrade'] }
+  #  - { role: postcheck, tags: ['postcheck'] }
+
+    # Optional future roles
+    # - { role: bgp_add, tags: ['bgp_add'] }
+    # - { role: routes_add, tags: ['routes_add'] }
+    # - { role: interfaces_add, tags: ['interfaces_add'] }

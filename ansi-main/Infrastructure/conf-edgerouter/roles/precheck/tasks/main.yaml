@@ -1,0 +1,15 @@
+- name: Check filesystem storage
+  ansible.builtin.command: cli -c "show system storage"
+  register: storage
+  changed_when: false
+
+- name: Check image storage
+  ansible.builtin.command: cli -c "show system image storage"
+  register: img_storage
+  changed_when: false
+
+- name: Print storage info
+  ansible.builtin.debug:
+    msg:
+      - "{{ storage.stdout }}"
+      - "{{ img_storage.stdout }}"

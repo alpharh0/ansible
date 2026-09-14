@@ -1,0 +1,80 @@
+---
+  - name: Check current version
+    shell: show version
+    register: version
+
+  - debug:
+      var: version.stdout_lines
+
+  - name: Backup config
+    shell: |
+      cli-shell-api showConfig > /config/config.pre_upgrade
+      cli-shell-api saveConfig
+
+  - name: Verify device model
+    shell: cat /tmp/device_model
+    register: model
+
+  - name: Fail if not ER-4
+    fail:
+      msg: "Not an ER-4 device"
+    when: "'ER-4' not in model.stdout"
+
+# =========================
+# STAGE 1: Upgrade to v1.10.11
+# =========================
+
+  - name: Upgrade to v1.10.11 (if needed)
+    shell: |
+      echo "y" | add system image {{ v1_url }}
+    when: "'v1.10.7' in version.stdout"
+
+  - name: Reboot after v1 upgrade
+    shell: reboot
+    async: 1
+    poll: 0
+    when: "'v1.10.7' in version.stdout"
+
+  - name: Wait for router (v1.10.11)
+    wait_for:
+      host: "{{ inventory_hostname }}"
+      port: 22
+      delay: 30
+      timeout: 300
+    when: "'v1.10.7' in version.stdout"
+
+  - name: Check version after v1 upgrade
+    shell: show version
+    register: version_after_v1
+
+  - debug:
+      var: version_after_v1.stdout_lines
+
+# =========================
+# STAGE 2: Upgrade to v2
+# =========================
+
+  - name: Upgrade to v2 firmware
+    shell: |
+      echo "y" | add system image {{ v2_url }}
+    when: "'v2.' not in version_after_v1.stdout"
+
+  - name: Reboot after v2 upgrade
+    shell: reboot
+    async: 1
+    poll: 0
+    when: "'v2.' not in version_after_v1.stdout"
+
+  - name: Wait for router (v2)
+    wait_for:
+      host: "{{ inventory_hostname }}"
+      port: 22
+      delay: 30
+      timeout: 400
+
+  - name: Final version check
+    shell: show version
+    register: final_version
+
+  - debug:
+      var: final_version.stdout_lines

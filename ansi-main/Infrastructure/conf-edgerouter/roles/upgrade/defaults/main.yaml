@@ -1,0 +1,16 @@
+---
+# Where to upload firmware on the router
+edgerouter_remote_path: "/tmp"
+
+# Firmware list in order (v1 then v2)
+edgerouter_firmware_files:
+  - version: "v1"
+    src_subdir: "1.10.11"
+    filename: "ER-e300.v1.10.11.5274269.tar"
+  - version: "v2"
+    src_subdir: "2.0.9"
+    filename: "ER-e300.v2.0.9-hotfix.7.5622762.tar"
+
+# Timeouts
+edgerouter_reboot_timeout: 600
+edgerouter_wait_delay: 30

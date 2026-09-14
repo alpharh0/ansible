@@ -1,0 +1,321 @@
+---
+# EdgeRouter firmware upgrade (polished + idempotent)
+# - Skip v1 if running >= v1_target
+# - Skip v2 if v2 hotfix tag already installed (from filename match + show system image)
+# - Uses vyatta-op-cmd-wrapper for operational commands in automation 
+# - Upgrade flow: add system image -> reboot to apply [1](https://barreras-it.com/announcements/39/EdgeRouter-3.0-Upgrade-Guide-New-Interface-WireGuard-and-Security.html)
+
+- name: "Set defaults"
+  ansible.builtin.set_fact:
+    reboot_timeout: "{{ reboot_timeout | default(900) }}"
+    reboot_delay: "{{ reboot_delay | default(30) }}"
+    ssh_drop_timeout: "{{ ssh_drop_timeout | default(180) }}"
+    remote_path: "{{ conf_edgerouter.upload.remote_path | default('/tmp') }}"
+
+- name: "Map firmware definitions from conf_edgerouter"
+  ansible.builtin.set_fact:
+    v1_target: "{{ conf_edgerouter.upload.files[0].src_subdir }}"   # e.g. 1.10.11
+    v2_target: "{{ conf_edgerouter.upload.files[1].src_subdir }}"   # e.g. 2.0.9
+    v1_file: "{{ conf_edgerouter.upload.files[0].filename }}"
+    v2_file: "{{ conf_edgerouter.upload.files[1].filename }}"
+    v1_src: "firmware/{{ conf_edgerouter.upload.files[0].src_subdir }}/{{ conf_edgerouter.upload.files[0].filename }}"
+    v2_src: "firmware/{{ conf_edgerouter.upload.files[1].src_subdir }}/{{ conf_edgerouter.upload.files[1].filename }}"
+
+- name: "Derive v2 hotfix tag from v2 filename (e.g. v2.0.9-hotfix.7)"
+  ansible.builtin.set_fact:
+    v2_hotfix_tag: "{{ (v2_file | regex_findall('v[0-9]+\\.[0-9]+\\.[0-9]+-hotfix\\.[0-9]+') | first) | default('') }}"
+
+- name: "Check vyatta operational wrapper exists"
+  ansible.builtin.stat:
+    path: /opt/vyatta/bin/vyatta-op-cmd-wrapper
+  register: opwrap
+
+- name: "Fail if wrapper missing"
+  ansible.builtin.fail:
+    msg: "Missing /opt/vyatta/bin/vyatta-op-cmd-wrapper; cannot run EdgeOS operational commands non-interactively."
+  when: not opwrap.stat.exists
+
+# ----------------------------
+# Baseline: version + image state
+# ----------------------------
+- name: "Baseline - show current version"
+  ansible.builtin.command:
+    cmd: /opt/vyatta/bin/vyatta-op-cmd-wrapper show version
+  register: ver_out
+  changed_when: false
+
+- name: "Extract Version line"
+  ansible.builtin.set_fact:
+    version_line: "{{ (ver_out.stdout_lines | select('match', '^\\s*Version:') | list | first) | default('Version: v0.0.0') }}"
+
+- name: "Extract version token from Version line"
+  ansible.builtin.set_fact:
+    version_token: "{{ (version_line.split() | last) | default('v0.0.0') }}"
+
+- name: "Parse running version (strip leading v)"
+  ansible.builtin.set_fact:
+    running_ver: "{{ (version_token | regex_replace('^v', '')) | default('0.0.0') }}"
+
+- name: "Validate running_ver format X.Y.Z"
+  ansible.builtin.set_fact:
+    running_ver: "{{ running_ver if (running_ver is match('^[0-9]+\\.[0-9]+\\.[0-9]+$')) else '0.0.0' }}"
+
+- name: "Compute numeric lists"
+  ansible.builtin.set_fact:
+    running_list: "{{ running_ver.split('.') | map('int') | list }}"
+    v1_list: "{{ v1_target.split('.') | map('int') | list }}"
+    v2_list: "{{ v2_target.split('.') | map('int') | list }}"
+
+- name: "Compute numeric decisions"
+  ansible.builtin.set_fact:
+    need_v1: "{{ running_list < v1_list }}"
+    need_v2_numeric: "{{ running_list < v2_list }}"
+
+- name: "Baseline - show system image"
+  ansible.builtin.command:
+    cmd: /opt/vyatta/bin/vyatta-op-cmd-wrapper show system image
+  register: img_out
+  changed_when: false
+
+- name: "Compute v2 hotfix installed flag"
+  ansible.builtin.set_fact:
+    has_v2_hotfix: "{{ (v2_hotfix_tag != '') and (v2_hotfix_tag in img_out.stdout) }}"
+
+- name: "Compute final need_v2"
+  ansible.builtin.set_fact:
+    need_v2: "{{ need_v2_numeric and (not has_v2_hotfix) }}"
+
+- name: "Debug v2 decision"
+  ansible.builtin.debug:
+    msg:
+      - "v2_hotfix_tag={{ v2_hotfix_tag }}"
+      - "need_v2_numeric={{ need_v2_numeric }}"
+      - "has_v2_hotfix={{ has_v2_hotfix }}"
+      - "need_v2(final)={{ need_v2 }}"
+
+- name: "Show baseline decision"
+  ansible.builtin.debug:
+    msg:
+      - "Version line: {{ version_line }}"
+      - "running_ver={{ running_ver }} running_list={{ running_list }}"
+      - "Targets: v1={{ v1_target }}, v2={{ v2_target }}, v2_hotfix_tag={{ v2_hotfix_tag }}"
+      - "need_v1={{ need_v1 }}"
+      - "need_v2_numeric={{ need_v2_numeric }}, has_v2_hotfix={{ has_v2_hotfix }}, need_v2(final)={{ need_v2 }}"
+
+# ----------------------------
+# Prechecks (vendor-recommended when upgrades fail due to storage) [1](https://barreras-it.com/announcements/39/EdgeRouter-3.0-Upgrade-Guide-New-Interface-WireGuard-and-Security.html)
+# ----------------------------
+- name: "Precheck - show system storage"
+  ansible.builtin.command:
+    cmd: /opt/vyatta/bin/vyatta-op-cmd-wrapper show system storage
+  changed_when: false
+
+- name: "Precheck - show system image storage"
+  ansible.builtin.command:
+    cmd: /opt/vyatta/bin/vyatta-op-cmd-wrapper show system image storage
+  changed_when: false
+
+# ----------------------------
+# Helper: reboot + prove it happened (SSH drops then returns)
+# ----------------------------
+- name: "Reboot device (non-interactive best effort)"
+  ansible.builtin.shell: |
+    set -o pipefail
+    printf 'y\n' | /opt/vyatta/bin/vyatta-op-cmd-wrapper reboot >/dev/null 2>&1 || true
+    sudo -n /sbin/reboot >/dev/null 2>&1 || true
+    /sbin/reboot >/dev/null 2>&1 || true
+  async: 1
+  poll: 0
+  changed_when: true
+  when: do_reboot | default(false) | bool
+
+- name: "Wait for SSH to drop (prove reboot started)"
+  ansible.builtin.wait_for:
+    host: "{{ ansible_host }}"
+    port: 22
+    state: stopped
+    timeout: "{{ ssh_drop_timeout }}"
+  delegate_to: localhost
+  when: do_reboot | default(false) | bool
+
+- name: "Wait for router to come back"
+  ansible.builtin.wait_for_connection:
+    delay: "{{ reboot_delay }}"
+    timeout: "{{ reboot_timeout }}"
+  when: do_reboot | default(false) | bool
+
+# # ----------------------------
+# # Stage v1 (ONLY if needed) — should SKIP on your router
+# # Upgrade flow: add system image then reboot to apply [1](https://barreras-it.com/announcements/39/EdgeRouter-3.0-Upgrade-Guide-New-Interface-WireGuard-and-Security.html)
+# # ----------------------------
+# - block:
+#     - name: "Upload firmware v1"
+#       ansible.builtin.copy:
+#         src: "{{ v1_src }}"
+#         dest: "{{ remote_path }}/{{ v1_file }}"
+#         mode: "0644"
+
+#     - name: "Stage v1 image (add system image)"
+#       ansible.builtin.command:
+#         cmd: /opt/vyatta/bin/vyatta-op-cmd-wrapper add system image {{ remote_path }}/{{ v1_file }}
+#       register: stage_v1
+#       changed_when: true
+
+#     - name: "Print v1 stage output"
+#       ansible.builtin.debug:
+#         var: stage_v1.stdout
+
+#     - name: "Set reboot flag (v1)"
+#       ansible.builtin.set_fact:
+#         do_reboot: true
+
+#     - name: "Reboot after v1 stage (apply image)"
+#       ansible.builtin.shell: |
+#         set -o pipefail
+#         printf 'y\n' | /opt/vyatta/bin/vyatta-op-cmd-wrapper reboot >/dev/null 2>&1 || true
+#         sudo -n /sbin/reboot >/dev/null 2>&1 || true
+#         /sbin/reboot >/dev/null 2>&1 || true
+#       async: 1
+#       poll: 0
+#       changed_when: true
+
+#     - name: "Wait for SSH to drop (v1 reboot)"
+#       ansible.builtin.wait_for:
+#         host: "{{ ansible_host }}"
+#         port: 22
+#         state: stopped
+#         timeout: "{{ ssh_drop_timeout }}"
+#       delegate_to: localhost
+
+#     - name: "Wait for router after v1 reboot"
+#       ansible.builtin.wait_for_connection:
+#         delay: "{{ reboot_delay }}"
+#         timeout: "{{ reboot_timeout }}"
+#   when: need_v1
+
+# - name: "Clear reboot flag"
+#   ansible.builtin.set_fact:
+#     do_reboot: false
+
+# # ----------------------------
+# # Before v2: ensure running image == default boot (avoid 'needs reboot before upgrade')
+# # ----------------------------
+# - name: "Read system image state (for v2)"
+#   ansible.builtin.command:
+#     cmd: /opt/vyatta/bin/vyatta-op-cmd-wrapper show system image
+#   register: img_state
+#   changed_when: false
+#   when: need_v2
+
+# - name: "Extract running/default image lines"
+#   ansible.builtin.set_fact:
+#     running_img_line: "{{ (img_state.stdout_lines | select('search', 'running image') | list | first) | default('') }}"
+#     default_img_line: "{{ (img_state.stdout_lines | select('search', 'default boot') | list | first) | default('') }}"
+#   when: need_v2
+
+# - name: "Parse running/default image names"
+#   ansible.builtin.set_fact:
+#     running_img: "{{ (running_img_line.split() | first) | default('') }}"
+#     default_img: "{{ (default_img_line.split() | first) | default('') }}"
+#   when: need_v2
+
+# - name: "Sync reboot if running != default (before v2)"
+#   ansible.builtin.set_fact:
+#     do_reboot: true
+#   when: need_v2 and running_img != '' and default_img != '' and running_img != default_img
+
+# - name: "Reboot to boot default image (pre-v2 sync)"
+#   ansible.builtin.shell: |
+#     set -o pipefail
+#     printf 'y\n' | /opt/vyatta/bin/vyatta-op-cmd-wrapper reboot >/dev/null 2>&1 || true
+#     sudo -n /sbin/reboot >/dev/null 2>&1 || true
+#     /sbin/reboot >/dev/null 2>&1 || true
+#   async: 1
+#   poll: 0
+#   changed_when: true
+#   when: need_v2 and running_img != '' and default_img != '' and running_img != default_img
+
+# - name: "Wait for SSH to drop (sync reboot)"
+#   ansible.builtin.wait_for:
+#     host: "{{ ansible_host }}"
+#     port: 22
+#     state: stopped
+#     timeout: "{{ ssh_drop_timeout }}"
+#   delegate_to: localhost
+#   when: need_v2 and running_img != '' and default_img != '' and running_img != default_img
+
+# - name: "Wait for router after sync reboot"
+#   ansible.builtin.wait_for_connection:
+#     delay: "{{ reboot_delay }}"
+#     timeout: "{{ reboot_timeout }}"
+#   when: need_v2 and running_img != '' and default_img != '' and running_img != default_img
+
+# - name: "Clear reboot flag (post sync)"
+#   ansible.builtin.set_fact:
+#     do_reboot: false
+
+# ----------------------------
+# Stage v2 (ONLY if needed)
+# Upgrade flow: add system image then reboot to apply [1](https://barreras-it.com/announcements/39/EdgeRouter-3.0-Upgrade-Guide-New-Interface-WireGuard-and-Security.html)
+# ----------------------------
+- block:
+    - name: "Upload firmware v2"
+      ansible.builtin.copy:
+        src: "{{ v2_src }}"
+        dest: "{{ remote_path }}/{{ v2_file }}"
+        mode: "0644"
+
+    - name: "Stage v2 image (add system image)"
+      ansible.builtin.command:
+        cmd: /opt/vyatta/bin/vyatta-op-cmd-wrapper add system image {{ remote_path }}/{{ v2_file }}
+      register: stage_v2
+      changed_when: true
+
+    - name: "Print v2 stage output"
+      ansible.builtin.debug:
+        var: stage_v2.stdout
+
+    - name: "Reboot after v2 stage (apply image)"
+      ansible.builtin.shell: |
+        set -o pipefail
+        printf 'y\n' | /opt/vyatta/bin/vyatta-op-cmd-wrapper reboot >/dev/null 2>&1 || true
+        sudo -n /sbin/reboot >/dev/null 2>&1 || true
+        /sbin/reboot >/dev/null 2>&1 || true
+      async: 1
+      poll: 0
+      changed_when: true
+
+    - name: "Wait for SSH to drop (v2 reboot)"
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: 22
+        state: stopped
+        timeout: "{{ ssh_drop_timeout }}"
+      delegate_to: localhost
+
+    - name: "Wait for router after v2 reboot"
+      ansible.builtin.wait_for_connection:
+        delay: "{{ reboot_delay }}"
+        timeout: "{{ reboot_timeout }}"
+  when: need_v2
+
+# ----------------------------
+# Final verification
+# ----------------------------
+- name: "Final - show version"
+  ansible.builtin.command:
+    cmd: /opt/vyatta/bin/vyatta-op-cmd-wrapper show version
+  register: final_ver
+  changed_when: false
+
+- name: "Final - show system image"
+  ansible.builtin.command:
+    cmd: /opt/vyatta/bin/vyatta-op-cmd-wrapper show system image
+  register: final_images
+  changed_when: false
+
+- name: "Print final state"
+  ansible.builtin.debug:
+    msg:
+      - "{{ final_ver.stdout }}"
+      - "{{ final_images.stdout }}"

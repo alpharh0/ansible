@@ -20,7 +20,7 @@
     sshpass -p {{ ansible_password | quote }}
     scp -o StrictHostKeyChecking=no
     {{ local_file }}
-    {{ ansible_user }}@{{ ansible_host }}:/{{ remote_file }}
+    {{ ansible_user }}@{{ ansible_host }}:{{ remote_file }}
   register: upload_result
   changed_when: true
 
