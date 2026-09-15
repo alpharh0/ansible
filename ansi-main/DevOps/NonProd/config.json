@@ -23,8 +23,10 @@
                 }
             },
             "conf-mikrotik": {
-                "mt1": {
-                    "mgmt_ip": "10.254.248.251",
+                "mt_group1": {
+                    "devices": [
+                        {"ip":"10.254.248.251"}
+                    ],
                     "upgrade": {
                         "local_file": "/root/Dev/ansi-main/Infrastructure/conf-mikrotik/roles/upgrade/firmware/7.24.2/routeros-7.24.2-arm.npk",
                         "remote_file": "routeros-7.24.2-arm.npk",
